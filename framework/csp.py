@@ -13,16 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
-
-
 import base64
 import copy
 import logging
 import os
-import six
 
 import flask
+
+import settings
 
 
 REPORT_ONLY = False
@@ -102,7 +100,7 @@ def get_csp_header_key():
 def build_policy(policy):
   """Builds the CSP policy string from the internal representation."""
   csp_directives = [
-      k + ' ' + ' '.join(v) for k, v in six.iteritems(policy) if v is not None
+      k + ' ' + ' '.join(v) for k, v in policy.items() if v is not None
   ]
   if REPORT_URI:
     csp_directives.append('report-uri %s' % REPORT_URI)
@@ -118,5 +116,6 @@ def get_headers(nonce):
 
 def report_handler():
   """Log any CSP violations that are reported to our app."""
-  logging.error('CSP Violation: %r' % flask.request.data)
+  logging.error('CSP Violation: %s' %
+                repr(flask.request.data)[:settings.MAX_LOG_LINE])
   return ''

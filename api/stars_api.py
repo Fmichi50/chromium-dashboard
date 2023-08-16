@@ -14,12 +14,7 @@
 # limitations under the License.
 
 
-
-
-import logging
-
 from framework import basehandlers
-from internals import models
 from internals import notifier
 
 
@@ -28,7 +23,7 @@ class StarsAPI(basehandlers.APIHandler):
   logic to toggle the star icon.  When a user has starred a feature, they
   will be sent notification emails about changes to that feature."""
 
-  def do_get(self):
+  def do_get(self, **kwargs):
     """Return a list of all starred feature IDs for the signed-in user."""
     user = self.get_current_user()
     if user:
@@ -41,7 +36,7 @@ class StarsAPI(basehandlers.APIHandler):
         }
     return data
 
-  def do_post(self):
+  def do_post(self, **kwargs):
     """Set or clear a star on the specified feature."""
     feature = self.get_specified_feature()
     starred = self.get_bool_param('starred', default=True)

@@ -34,9 +34,7 @@ cookie
 node_modules
 
 # Source for generated files
-static/elements/
-static/sass/
-static/js-src/
+client-src
 
 # OS files
 *.DS_Store
@@ -48,3 +46,9 @@ htmlcov
 # Python venv directory
 cs-env
 tutorial-env
+
+# Testdata for Python tests
+testdata
+
+# API Key for local development
+ot_api_key.txt

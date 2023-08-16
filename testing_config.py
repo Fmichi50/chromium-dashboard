@@ -1,6 +1,3 @@
-
-
-
 # Copyright 2020 Google Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License")
@@ -17,32 +14,13 @@
 
 import logging
 import os
-import sys
 import unittest
 
-app_engine_path = os.environ.get('APP_ENGINE_PATH', '')
-if not app_engine_path:
-  app_engine_path = '/usr/lib/google-cloud-sdk/platform/google_appengine'
-if os.path.exists(app_engine_path):
-  sys.path.insert(0, app_engine_path)
-else:
-  print('Could not find appengine, please set APP_ENGINE_PATH',
-        file=sys.stderr)
-  sys.exit(1)
+from google.cloud import ndb  # type: ignore
+from pathlib import Path
 
-import dev_appserver
-dev_appserver.fix_sys_path()
-
-lib_path = os.path.join(os.path.dirname(__file__), 'lib')
-from google.appengine.ext import vendor
-vendor.add(lib_path) # add third party libs to "lib" folder.
-
-from google.cloud import ndb
-
-os.environ['DJANGO_SECRET'] = 'test secret'
 os.environ['SERVER_SOFTWARE'] = 'test ' + os.environ.get('SERVER_SOFTWARE', '')
 os.environ['CURRENT_VERSION_ID'] = 'test.123'
-os.environ['DJANGO_SETTINGS_MODULE'] = 'settings'
 os.environ['APPLICATION_ID'] = 'testing'
 # Envs for datastore-emulator, same as running `gcloud beta emulators datastore env-init`.
 os.environ['DATASTORE_DATASET'] = 'cr-status-staging'
@@ -63,7 +41,7 @@ class FakeCloudTasksClient(object):
     return "projects/{project}/locations/{location}/queues/{queue}".format(
         project=project, location=location, queue=queue)
 
-  def create_task(self, unused_parent, task, **kwargs):
+  def create_task(self, parent=None, task=None, **kwargs):
     """Just log that the task would have been created URL."""
     self.uri = task.get('app_engine_http_request').get('relative_uri')
     self.body = task.get('app_engine_http_request').get('body')
@@ -110,3 +88,35 @@ class CustomTestCase(unittest.TestCase):
     client = ndb.Client()
     with client.context():
       super(CustomTestCase, self).run(result=result)
+
+
+class Testdata(object):
+  def __init__(self, test_file_path: str):
+    """Helper class to load testdata
+    Common pattern to place the testdata in the following format:
+
+    Given a test file, atest_test.py, and it is located at
+    /some/module/atest_test.py.
+
+    The testdata should be located at /some/module/testdata/atest_test/
+    """
+    self.testdata = {}
+    test_file_name = Path(test_file_path).stem
+    self.testdata_dir = os.path.join(
+        os.path.abspath(os.path.dirname(test_file_path)),
+        'testdata',
+        test_file_name)
+    for filename in os.listdir(self.testdata_dir):
+      test_data_file_path = os.path.join(self.testdata_dir, filename)
+      with open(test_data_file_path, 'r', encoding='UTF-8') as f:
+        self.testdata[filename] = f.read()
+
+  def make_golden(self, raw_data, test_data_file_name):
+    """Helper function to make golden file
+    """
+    test_data_file_path = os.path.join(self.testdata_dir, test_data_file_name)
+    with open(test_data_file_path, 'w', encoding='UTF-8') as f:
+      f.write(raw_data)
+
+  def __getitem__(self, key):
+      return self.testdata[key]

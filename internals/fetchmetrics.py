@@ -13,9 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
-
-
 import base64
 import datetime
 import json
@@ -23,16 +20,20 @@ import logging
 from xml.dom import minidom
 import requests
 
+from google.auth.transport import requests as reqs
+from google.oauth2 import id_token
+
 from framework import basehandlers
-from framework import ramcache
+from framework import rediscache
 from framework import utils
-from internals import models
+from internals import metrics_models
+from internals import user_models
 import settings
 
 
 UMA_QUERY_SERVER = 'https://uma-export.appspot.com/chromestatus/'
 
-HISTOGRAMS_URL = 'https://chromium.googlesource.com/chromium/src/+/master/' \
+HISTOGRAMS_URL = 'https://chromium.googlesource.com/chromium/src/+/main/' \
     'tools/metrics/histograms/enums.xml?format=TEXT'
 
 # After we have processed all metrics data for a given kind on a given day,
@@ -49,7 +50,11 @@ def _FetchMetrics(url):
     # https://cloud.google.com/appengine/docs/python/appidentity/#asserting_identity_to_other_app_engine_apps
     # GAE request limit is 60s, but it could go longer due to start-up latency.
     logging.info('Requesting metrics from: %r', url)
-    return requests.request('GET', url, timeout=120.0, allow_redirects=False)
+    token = id_token.fetch_id_token(reqs.Request(), url)
+    logging.info('token is %r', token)
+    return requests.request(
+        'GET', url, timeout=120.0, allow_redirects=False,
+        headers={'Authorization': 'Bearer {}'.format(token)})
   else:
     logging.info('Prod would get metrics from: %r', url)
     return None  # dev instances cannot access uma-export.
@@ -93,13 +98,20 @@ class UmaQuery(object):
           url, result.status_code))
       return (None, result.status_code)
 
-    json_content = result.content.split('\n', 1)[1]
+    full_response_content = result.content.decode()
+    logging.info('full response: %r',
+                 full_response_content[:settings.MAX_LOG_LINE])
+    # Skip XSSI protection line.
+    json_content = full_response_content.split('\n', 1)[1]
     j = json.loads(json_content)
-    if 'r' not in j:
-      logging.info(
-          '%s results do not have an "r" key in the response: %r' %
-          (self.query_name, j))
+    for key, val in j.items():
+      logging.info('key: %r', key)
+      logging.info('val: %r', repr(val)[:settings.MAX_LOG_LINE])
+    if 'r' not in j or not j['r']:
       logging.info('Note: uma-export can take 2 days to produce metrics')
+      return (None, 404)
+    if 'e' in j:
+      logging.error('uma-export gave an error message: %r', j['e'])
       return (None, 404)
     return (j['r'], result.status_code)
 
@@ -153,27 +165,28 @@ class UmaQuery(object):
 
 UMA_QUERIES = [
   UmaQuery(query_name='usecounter.features',
-           model_class=models.FeatureObserver,
-           property_map_class=models.FeatureObserverHistogram),
+           model_class=metrics_models.FeatureObserver,
+           property_map_class=metrics_models.FeatureObserverHistogram),
   UmaQuery(query_name='usecounter.cssproperties',
-           model_class=models.StableInstance,
-           property_map_class=models.CssPropertyHistogram),
+           model_class=metrics_models.StableInstance,
+           property_map_class=metrics_models.CssPropertyHistogram),
   UmaQuery(query_name='usecounter.animatedcssproperties',
-           model_class=models.AnimatedProperty,
-           property_map_class=models.CssPropertyHistogram),
+           model_class=metrics_models.AnimatedProperty,
+           property_map_class=metrics_models.CssPropertyHistogram),
 ]
 
 
 class YesterdayHandler(basehandlers.FlaskHandler):
   """Loads yesterday's UMA data."""
 
-  def get_template_data(self, today=None):
+  def get_template_data(self, **kwargs):
     """Loads the data file located at |filename|.
 
     Args:
       filename: The filename for the data file to be loaded.
       today: date passed in for testing, defaults to today.
     """
+    self.require_cron_header()
     days = []
     date_str = self.request.args.get('date')
     if date_str:
@@ -185,7 +198,7 @@ class YesterdayHandler(basehandlers.FlaskHandler):
         self.abort(400, msg='Failed to parse date string.')
 
     else:
-      today = today or datetime.date.today()
+      today = kwargs.get('today', datetime.date.today())
       days = [today - datetime.timedelta(days_ago)
               for days_ago in [1, 2, 3, 4, 5]]
 
@@ -200,15 +213,21 @@ class YesterdayHandler(basehandlers.FlaskHandler):
                 'WebStatusAlert-1: Failed to get metrics even after 2 days')
           return error_message, 500
 
-    ramcache.flush_all()
+    # The code above calls FetchAndSaveData() which calls _SaveData(),
+    # which calls put() a bunch of times to add a new entity for each metrics datapoint.
+    # Separately, when a request comes in get get metrics data, the file api/metricsdata.py
+    # does a query on those datapoints and caches the result. If we don't invalidate when
+    # we add datapoints, the cached query result will be lacking the new datapoints.
+    # This is run once every 6 hours.
+    rediscache.delete_keys_with_prefix('metrics|*')
     return 'Success'
 
 
 class HistogramsHandler(basehandlers.FlaskHandler):
 
   MODEL_CLASS = {
-    'FeatureObserver': models.FeatureObserverHistogram,
-    'MappedCSSProperties': models.CssPropertyHistogram,
+    'FeatureObserver': metrics_models.FeatureObserverHistogram,
+    'MappedCSSProperties': metrics_models.CssPropertyHistogram,
   }
 
   def _SaveData(self, data, histogram_id):
@@ -223,7 +242,7 @@ class HistogramsHandler(basehandlers.FlaskHandler):
     key_name = '%s_%s' % (bucket_id, property_name)
 
     # Bucket ID 1 is reserved for number of CSS Pages Visited. So don't add it.
-    if (model_class == models.CssPropertyHistogram and bucket_id == 1):
+    if (model_class == metrics_models.CssPropertyHistogram and bucket_id == 1):
       return
 
     model_class.get_or_insert(key_name,
@@ -231,7 +250,8 @@ class HistogramsHandler(basehandlers.FlaskHandler):
       property_name=property_name
     )
 
-  def get_template_data(self):
+  def get_template_data(self, **kwargs):
+    self.require_cron_header()
     # Attempt to fetch enums mapping file.
     response = requests.get(HISTOGRAMS_URL, timeout=60)
 
@@ -265,6 +285,7 @@ class HistogramsHandler(basehandlers.FlaskHandler):
 
 class BlinkComponentHandler(basehandlers.FlaskHandler):
   """Updates the list of Blink components in the db."""
-  def get_template_data(self):
-    models.BlinkComponent.update_db()
+  def get_template_data(self, **kwargs):
+    self.require_cron_header()
+    user_models.BlinkComponent.update_db()
     return 'Blink components updated'

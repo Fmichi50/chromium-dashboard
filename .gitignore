@@ -18,7 +18,7 @@ env_vars.yaml
 node_modules
 
 # Generated files
-static/css/
+# static/css/
 static/dist/
 static/js/
 
@@ -28,3 +28,12 @@ static/js/
 # Test coverage tool
 .coverage
 htmlcov
+
+# Web test runner coverage report
+coverage
+
+# venv directory
+cs-env
+
+# API Key for local development
+ot_api_key.txt

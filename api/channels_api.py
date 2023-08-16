@@ -13,19 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
-
-
 import logging
 import json
-
-from framework import basehandlers
-from framework import ramcache
 import requests
 
+from framework import basehandlers
+from framework import rediscache
 from internals import fetchchannels
+import settings
+
 
 SCHEDULE_CACHE_TIME = 60 * 60  # 1 hour
+
 
 def construct_chrome_channels_details():
   omaha_data = fetchchannels.get_omaha_data()
@@ -44,30 +43,33 @@ def construct_chrome_channels_details():
     new_beta_version = channels['stable']['version'] + 1
     channels['beta'] = fetch_chrome_release_info(new_beta_version)
     channels['beta']['version'] = new_beta_version
+  if channels['beta']['version'] == channels['dev']['version']:
     new_dev_version = channels['beta']['version'] + 1
     channels['dev'] = fetch_chrome_release_info(new_dev_version)
     channels['dev']['version'] = new_dev_version
 
   return channels
 
+
 def fetch_chrome_release_info(version):
   key = 'chromerelease|%s' % version
 
-  data = ramcache.get(key)
+  data = rediscache.get(key)
   if data is None:
     url = ('https://chromiumdash.appspot.com/fetch_milestone_schedule?'
            'mstone=%s' % version)
     result = requests.get(url, timeout=60)
     if result.status_code == 200:
       try:
-        logging.info('result.content is:\n%s', result.content)
+        logging.info(
+            'result.content is:\n%s', result.content[:settings.MAX_LOG_LINE])
         result_json = json.loads(result.content)
         if 'mstones' in result_json:
           data = result_json['mstones'][0]
           del data['owners']
           del data['feature_freeze']
           del data['ldaps']
-          ramcache.set(key, data, time=SCHEDULE_CACHE_TIME)
+          rediscache.set(key, data, time=SCHEDULE_CACHE_TIME)
       except ValueError:
         pass  # Handled by next statement
 
@@ -79,9 +81,10 @@ def fetch_chrome_release_info(version):
           'mstone': version,
           'version': version,
       }
-      # Note: we don't put placeholder data into ramcache.
+      # Note: we don't put placeholder data into redis.
 
   return data
+
 
 def construct_specified_milestones_details(start, end):
   channels = {}
@@ -92,25 +95,21 @@ def construct_specified_milestones_details(start, end):
 
   return channels
 
+
 class ChannelsAPI(basehandlers.APIHandler):
   """Channels are the Chrome Versions across platforms."""
 
-  def do_get(self):
+  def do_get(self, **kwargs):
     # Query-string parameters 'start' and 'end' are provided
-    if (self.request.args.get('start') is not None and
-        self.request.args.get('end') is not None):
-      try:
-        start = int(self.request.args.get('start'))
-        end = int(self.request.args.get('end'))
-        if (start > end):
-          raise ValueError
-        channels = construct_specified_milestones_details(start, end)
-      except ValueError:
-        self.abort(400, msg='Invalid  Start and End Values provided')
-    else:
-      channels = construct_chrome_channels_details()
+    start = self.get_int_arg('start')
+    end = self.get_int_arg('end')
+    if start is None or end is None:
+      return construct_chrome_channels_details()
 
-    return channels
+    if start > end:
+      raise ValueError
+
+    return construct_specified_milestones_details(start, end)
 
   # TODO(jrobbins): do_post
 
